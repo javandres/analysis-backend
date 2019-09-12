@@ -23,6 +23,7 @@ import org.apache.commons.fileupload.FileItemFactory;
 import org.apache.commons.fileupload.disk.DiskFileItemFactory;
 import org.apache.commons.fileupload.servlet.ServletFileUpload;
 import org.json.simple.JSONObject;
+import org.opengis.feature.simple.SimpleFeature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import spark.Request;
@@ -33,12 +34,17 @@ import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URL;
+import java.text.MessageFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPOutputStream;
 
@@ -56,12 +62,26 @@ public class AggregationAreaController {
             .build();
     private static final FileItemFactory fileItemFactory = new DiskFileItemFactory();
 
-    public static AggregationArea createAggregationArea (Request req, Response res) throws Exception {
+    private static int MAX_FEATURES = 60; // Arbitrary limit to prevent UI clutter from many aggregation  areas (e.g.
+    // if someone uploads thousands of blocks). Someone might reasonably request an aggregation area for
+    // each of Chicago's 50 wards, so that's a good approximate limit for now.
+
+    /**
+     * Create binary .grid files for aggregation (aka mask) areas, save them to S3, and persist their details.
+     * @param req Must include a shapefile on which the aggregation area(s) will be based.
+     *
+     *            Expected HTTP query parameters include "union" and "name." If "union==true", features will be merged
+     *            to a single aggregation area, named using the value of the "name" query parameter directly.  If
+     *            "union==false", each feature will be an aggregation area, named using its value for the shapefile
+     *            property specified by "name."
+     */
+
+    public static List<AggregationArea> createAggregationAreas (Request req, Response res) throws Exception {
+        ArrayList<AggregationArea> aggregationAreas = new ArrayList<>();
         ServletFileUpload sfu = new ServletFileUpload(fileItemFactory);
         Map<String, List<FileItem>> query = sfu.parseParameterMap(req.raw());
 
-        // extract relevant files: .shp, .prj, .dbf, and .shx.
-        // We need the SHX even though we're looping over every feature as they might be sparse.
+        // 1. Extract relevant files: .shp, .prj, .dbf, and .shx. ======================================================
         Map<String, FileItem> filesByName = query.get("files").stream()
                 .collect(Collectors.toMap(FileItem::getName, f -> f));
 
@@ -99,47 +119,79 @@ public class AggregationAreaController {
 
         ShapefileReader reader = new ShapefileReader(shpFile);
 
-        List<Geometry> geometries = reader.wgs84Stream()
-                    .map(f -> (Geometry) f.getDefaultGeometry())
-                    .collect(Collectors.toList());
-        UnaryUnionOp union = new UnaryUnionOp(geometries);
-        Geometry merged = union.union();
 
-        Envelope env = merged.getEnvelopeInternal();
-        Grid maskGrid = new Grid(SeamlessCensusGridExtractor.ZOOM, env.getMaxY(), env.getMaxX(), env.getMinY(), env.getMinX());
+        // 2. Read features ============================================================================================
+        List<SimpleFeature> features = reader.wgs84Stream().collect(Collectors.toList());
+        Map<String, Geometry> areas = new HashMap<>();
 
-        // Store the percentage each cell overlaps the mask, scaled as 0 to 100,000
-        List<Grid.PixelWeight> weights = maskGrid.getPixelWeights(merged, true);
-        weights.forEach(pixel -> maskGrid.grid[pixel.x][pixel.y] = pixel.weight * 100_000);
+        if (features.size() > MAX_FEATURES) {
+            throw AnalysisServerException.fileUpload(MessageFormat.format("The uploaded shapefile has {0} features, " +
+                    "which exceeds the limit of {1}", features.size(), MAX_FEATURES));
+        }
 
-        ObjectMetadata metadata = new ObjectMetadata();
-        metadata.setContentEncoding("gzip");
-        metadata.setContentType("application/octet-stream");
+        if (Boolean.parseBoolean(req.params("union"))) {
+            // Union (single combined aggregation area) requested
+            List<Geometry> geometries = features.stream().map(f -> (Geometry) f.getDefaultGeometry()).collect(Collectors.toList());
+            UnaryUnionOp union = new UnaryUnionOp(geometries);
+            // Name the area using the name in the request directly
+            areas.put(maskName, union.union());
+        } else {
+            // Don't union. Name each area by looking up its value for the name property in the request.
+            features.stream().forEach(f -> areas.put(readProperty(f, maskName), (Geometry) f.getDefaultGeometry()));
+        }
+        // 3. Convert to raster grids, then store them. ================================================================
+        areas.forEach((String name, Geometry geometry) -> {
+            Envelope env = geometry.getEnvelopeInternal();
+            Grid maskGrid = new Grid(SeamlessCensusGridExtractor.ZOOM, env.getMaxY(), env.getMaxX(), env.getMinY(), env.getMinX());
 
-        AggregationArea aggregationArea = new AggregationArea();
-        aggregationArea.name = maskName;
-        aggregationArea.regionId = regionId;
+            // Store the percentage each cell overlaps the mask, scaled as 0 to 100,000
+            List<Grid.PixelWeight> weights = maskGrid.getPixelWeights(geometry, true);
+            weights.forEach(pixel -> maskGrid.grid[pixel.x][pixel.y] = pixel.weight * 100_000);
 
-        // Set `createdBy` and `accessGroup`
-        aggregationArea.accessGroup = req.attribute("accessGroup");
-        aggregationArea.createdBy = req.attribute("email");
+            ObjectMetadata metadata = new ObjectMetadata();
+            metadata.setContentEncoding("gzip");
+            metadata.setContentType("application/octet-stream");
 
-        File gridFile = new File(tempDir, "weights.grid");
-        OutputStream os = new GZIPOutputStream(new BufferedOutputStream(new FileOutputStream(gridFile)));
-        maskGrid.write(os);
-        os.close();
+            AggregationArea aggregationArea = new AggregationArea();
+            aggregationArea.name = name;
+            aggregationArea.regionId = regionId;
 
-        // Create the aggregation area before generating the S3 key so that the `_id` is generated
-        Persistence.aggregationAreas.create(aggregationArea);
+            // Set `createdBy` and `accessGroup`
+            aggregationArea.accessGroup = req.attribute("accessGroup");
+            aggregationArea.createdBy = req.attribute("email");
 
-        InputStream is = new BufferedInputStream(new FileInputStream(gridFile));
-        // can't use putObject with File when we have metadata . . .
-        S3Util.s3.putObject(AnalysisServerConfig.gridBucket, aggregationArea.getS3Key(), is, metadata);
-        is.close();
+            try {
+                File gridFile = File.createTempFile(UUID.randomUUID().toString(),"grid");
+                OutputStream os = new GZIPOutputStream(new BufferedOutputStream(new FileOutputStream(gridFile)));
+                maskGrid.write(os);
+                os.close();
 
-        tempDir.delete();
+                // Create the aggregation area before generating the S3 key so that the `_id` is generated
+                Persistence.aggregationAreas.create(aggregationArea);
 
-        return aggregationArea;
+                aggregationAreas.add(aggregationArea);
+
+                InputStream is = new BufferedInputStream(new FileInputStream(gridFile));
+                // can't use putObject with File when we have metadata . . .
+                S3Util.s3.putObject(AnalysisServerConfig.gridBucket, aggregationArea.getS3Key(), is, metadata);
+                is.close();
+            } catch (IOException e) {
+                throw new AnalysisServerException("Error processing/uploading aggregation area");
+            }
+
+            tempDir.delete();
+        });
+
+        return aggregationAreas;
+    }
+
+    static String readProperty (SimpleFeature feature, String propertyName) {
+        try {
+            return feature.getProperty(propertyName).getValue().toString();
+        } catch (NullPointerException e) {
+            throw new AnalysisServerException("The supplied Name was not a property of the uploaded features. " +
+                    "Double check that the Name corresponds to a shapefile column.");
+        }
     }
 
     public static Object getAggregationArea (Request req, Response res) {
@@ -162,6 +214,7 @@ public class AggregationAreaController {
 
     public static void register () {
         get("/api/region/:regionId/aggregationArea/:maskId", AggregationAreaController::getAggregationArea, JsonUtil.objectMapper::writeValueAsString);
-        post("/api/region/:regionId/aggregationArea", AggregationAreaController::createAggregationArea, JsonUtil.objectMapper::writeValueAsString);
+        post("/api/region/:regionId/aggregationArea", AggregationAreaController::createAggregationAreas,
+                JsonUtil.objectMapper::writeValueAsString);
     }
 }
