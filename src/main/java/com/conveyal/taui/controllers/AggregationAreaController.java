@@ -134,7 +134,8 @@ public class AggregationAreaController {
 
         InputStream is = new BufferedInputStream(new FileInputStream(gridFile));
         // can't use putObject with File when we have metadata . . .
-        S3Util.s3.putObject(AnalysisServerConfig.gridBucket, aggregationArea.getS3Key(), is, metadata);
+        //S3Util.s3.putObject(AnalysisServerConfig.gridBucket, aggregationArea.getS3Key(), is, metadata);
+        s3.putObject(AnalysisServerConfig.gridBucket, aggregationArea.getS3Key(), is, metadata);
         is.close();
 
         tempDir.delete();

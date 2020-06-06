@@ -6,7 +6,7 @@
 
     <groupId>com.conveyal</groupId>
     <artifactId>analysis</artifactId>
-    <version>5.8.0-SNAPSHOT</version>
+    <version>5.7.0</version>
     <build>
         <plugins>
             <plugin>
@@ -99,6 +99,32 @@
             <id>jitpack.io</id>
             <url>https://jitpack.io</url>
         </repository>
+        <repository>
+            <id>axiomalaska</id>
+            <name>axiomalaska</name>
+            <url>http://nexus.axiomalaska.com/nexus/content/repositories/public</url>
+        </repository>
+          <!-- <repository>
+            <id>osgeo</id>
+            <name>OSGeo Release Repository</name>
+            <url>https://repo.osgeo.org/repository/release/</url>
+            <snapshots><enabled>false</enabled></snapshots>
+            <releases><enabled>true</enabled></releases>
+        </repository> -->
+        <repository>
+        <id>osgeo</id>
+        <name>OSGeo Release Repository</name>
+        <url>https://repo.osgeo.org/repository/release/</url>
+        <snapshots><enabled>false</enabled></snapshots>
+        <releases><enabled>true</enabled></releases>
+      </repository>
+      <repository>
+        <id>osgeo-snapshot</id>
+        <name>OSGeo Snapshot Repository</name>
+        <url>https://repo.osgeo.org/repository/snapshot/</url>
+        <snapshots><enabled>true</enabled></snapshots>
+        <releases><enabled>false</enabled></releases>
+      </repository>
     </repositories>
 
     <dependencies>
@@ -162,6 +188,12 @@
             <version>3.1.5</version>
         </dependency>
 
+        <dependency>
+            <groupId>com.conveyal</groupId>
+            <artifactId>geobuf-java</artifactId>
+            <version>1.0</version>
+        </dependency>
+
         <!--We pull this in transitively (e.g. via r5/gtfs-lib, but an incompatible version in seamless-census is
         shallower, which causes problems unless we explicitly depend on a the right version here -->
         <dependency>
@@ -170,12 +202,18 @@
             <version>1.0.8</version>
         </dependency>
 
+        <!-- <dependency>
+            <groupId>com.vividsolutions</groupId>
+            <artifactId>jts</artifactId>
+            <version>1.13</version>
+        </dependency> -->
+
         <dependency>
             <groupId>com.vividsolutions</groupId>
             <artifactId>jts</artifactId>
             <version>1.13</version>
         </dependency>
-
+        
         <dependency>
             <groupId>com.conveyal.data.census</groupId>
             <artifactId>seamless-census</artifactId>

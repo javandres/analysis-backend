@@ -1,0 +1,41 @@
+version: "3"
+
+networks:
+  ca-network:
+
+volumes:
+  mongodb-volume:
+
+services:
+  backend:
+    container_name: convanalysis_backend_java
+    build:
+      context: .
+    depends_on:
+      - mongodb
+    environment:
+      # https://github.com/ufoscout/docker-compose-wait
+      WAIT_HOSTS: mongodb:27017
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+    links:
+      - mongodb
+    ports:
+      - "7070:7070"
+    volumes:
+      - ./analysis.properties.docker:/app/analysis.properties:ro
+    networks:
+      - ca-network  
+        
+  mongodb:
+    container_name: convanalysis_backend_mongodb
+    image: mongo:4
+    volumes:
+      - mongodb-volume:/data/db:rw
+    networks:
+      - ca-network
+    ports:
+      - "27017:27017"  
+    command: mongod --dbpath /data/db --nojournal --oplogSize 16 --noauth
+

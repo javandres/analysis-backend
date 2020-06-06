@@ -26,3 +26,5 @@ logentries.xml
 src/main/resources/git.properties
 pom.xml.versionsBackup
 analysis.properties
+analysis.properties.docker
+.env
