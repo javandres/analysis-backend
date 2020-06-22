@@ -36,6 +36,6 @@ services:
     networks:
       - ca-network
     ports:
-      - "27017:27017"  
+      - "27018:27017"  
     command: mongod --dbpath /data/db --nojournal --oplogSize 16 --noauth
 
